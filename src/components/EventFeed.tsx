@@ -1,0 +1,11 @@
+import { useMemo } from 'react';
+import type { CapitalEvent } from '../data/types';
+import { formatTime } from '../lib/format';
+
+const typeLabels: Record<CapitalEvent['type'], string> = { capex: 'CAPEX', earnings: 'EARNINGS', policy: 'POLICY', 'm&a': 'M&A', supply: 'SUPPLY', technology: 'TECH' };
+const stateLabels: Record<CapitalEvent['state'], string> = { new: '新发生', developing: '持续发酵', diverging: '出现分歧', cooling: '逐渐降温', ended: '事件结束' };
+
+export default function EventFeed({ events, activeTheme, selectedEventId, onSelect }: { events: CapitalEvent[]; activeTheme: string; selectedEventId: string | null; onSelect: (event: CapitalEvent) => void }) {
+  const visibleEvents = useMemo(() => [...events.filter((event) => activeTheme === 'all' || event.themes.includes(activeTheme))].sort((a, b) => b.heat - a.heat), [activeTheme, events]);
+  return <section className="event-feed" aria-label="今日资本热点"><div className="feed-header"><div><span className="eyebrow">CAPITAL SIGNALS</span><h1>今日热点</h1></div><span className="feed-count">{visibleEvents.length.toString().padStart(2, '0')} EVENTS</span></div><div className="feed-scroll">{visibleEvents.length ? visibleEvents.map((event, index) => <button aria-pressed={selectedEventId === event.id} key={event.id} className={`event-card ${selectedEventId === event.id ? 'is-selected' : ''}`} onClick={() => onSelect(event)}><div className="event-card-top"><span className={`event-type event-type-${event.type}`}>{typeLabels[event.type]}</span><span className="event-time">{formatTime(event.occurredAt)}</span></div><strong>{event.title}</strong><p>{event.summary}</p><div className="event-card-footer"><span><i className={`heat-bar heat-${event.importance}`} /> 热度 {event.heat}</span><span>{event.sourceCount} 来源</span><span className={`event-state state-${event.state}`}>{stateLabels[event.state]}</span></div>{index === 0 && <div className="featured-radar" aria-hidden="true"><span /><span /><span /></div>}</button>) : <div className="feed-empty"><span>○</span><strong>该主题暂无热点</strong><small>事件图层仍可独立浏览</small></div>}</div><div className="feed-bottom"><span className="scroll-cue">↓</span> 拖动地球探索更多热点 <span className="feed-time">MOCK · CST</span></div></section>;
+}
