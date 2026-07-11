@@ -2,6 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import * as Cesium from 'cesium';
 import type { CapitalEvent, Company, CompanyRelationship, Coordinates, RelationshipType } from '../data/types';
 import type { AtlasMode, CameraRequest } from '../features/atlas/useAtlasController';
+import {
+  applyImageryGrade,
+  configureCinematicScene,
+  createEsriImageryProvider,
+  createIonImageryProvider,
+  createNaturalEarthImageryProvider,
+  GLOBE_VISUALS,
+  type GlobeImagerySource,
+} from './globeVisualConfig';
 
 type Props = {
   mode: AtlasMode;
@@ -29,7 +38,7 @@ const COLORS = {
   negative: Cesium.Color.fromCssColorString('#ff7b88'),
   event: Cesium.Color.fromCssColorString('#ffb454'),
   secondary: Cesium.Color.fromCssColorString('#63d6ff'),
-  background: Cesium.Color.fromCssColorString('#07101d'),
+  background: Cesium.Color.fromCssColorString('#020712'),
   white: Cesium.Color.fromCssColorString('#f4fbfc'),
 };
 
@@ -102,24 +111,54 @@ export default function GlobeView(props: Props) {
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
       baseLayer: false,
       shouldAnimate: true,
+      msaaSamples: 4,
     });
-    viewer.scene.backgroundColor = COLORS.background;
-    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#0c2433');
-    viewer.scene.globe.enableLighting = false;
-    viewer.scene.globe.showGroundAtmosphere = true;
-    viewer.scene.fog.enabled = true;
-    viewer.scene.fog.density = 0.00008;
-    viewer.scene.screenSpaceCameraController.enableTilt = true;
+    configureCinematicScene(viewer);
 
-    const imagery = viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
-      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      maximumLevel: 7,
-      credit: '© OpenStreetMap contributors',
-    }));
-    imagery.brightness = 0.42;
-    imagery.contrast = 1.42;
-    imagery.saturation = 0.12;
-    imagery.gamma = 0.78;
+    let disposed = false;
+    let activeImagery: Cesium.ImageryLayer | undefined;
+    let removeImageryErrorListener: (() => void) | undefined;
+    let fallbackStarted = false;
+    let naturalEarthStarted = false;
+    let esriErrorCount = 0;
+
+    const installImagery = (provider: Cesium.ImageryProvider, source: GlobeImagerySource) => {
+      if (disposed) return;
+      removeImageryErrorListener?.();
+      if (activeImagery && viewer.imageryLayers.contains(activeImagery)) viewer.imageryLayers.remove(activeImagery, true);
+      activeImagery = viewer.imageryLayers.addImageryProvider(provider, 0);
+      applyImageryGrade(activeImagery, source);
+      containerRef.current?.setAttribute('data-imagery-source', source);
+      removeImageryErrorListener = provider.errorEvent.addEventListener(() => {
+        if (source === 'cesium-ion') void installFallbackImagery();
+        if (source === 'esri-world-imagery' && ++esriErrorCount >= 3) void installNaturalEarthImagery();
+      });
+    };
+
+    const installNaturalEarthImagery = async () => {
+      if (naturalEarthStarted || disposed) return;
+      naturalEarthStarted = true;
+      installImagery(await createNaturalEarthImageryProvider(), 'natural-earth');
+    };
+
+    const installFallbackImagery = async () => {
+      if (fallbackStarted || disposed) return;
+      fallbackStarted = true;
+      try {
+        installImagery(await createEsriImageryProvider(), 'esri-world-imagery');
+      } catch {
+        if (disposed) return;
+        await installNaturalEarthImagery();
+      }
+    };
+
+    if (Cesium.Ion.defaultAccessToken) {
+      void createIonImageryProvider()
+        .then((provider) => installImagery(provider, 'cesium-ion'))
+        .catch(() => installFallbackImagery());
+    } else {
+      void installFallbackImagery();
+    }
 
     const sources: AtlasSources = {
       companies: new Cesium.CustomDataSource('listed-companies'),
@@ -133,7 +172,7 @@ export default function GlobeView(props: Props) {
     sourcesRef.current = sources;
 
     viewer.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(112, 22, 24_500_000),
+      destination: Cesium.Cartesian3.fromDegrees(112, 22, GLOBE_VISUALS.initialAltitude),
       orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
     });
     viewer.screenSpaceEventHandler.setInputAction((movement: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -148,6 +187,8 @@ export default function GlobeView(props: Props) {
     viewerRef.current = viewer;
     setReady(true);
     return () => {
+      disposed = true;
+      removeImageryErrorListener?.();
       removeClusterListener();
       viewer.screenSpaceEventHandler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK);
       if (!viewer.isDestroyed()) viewer.destroy();
@@ -175,14 +216,14 @@ export default function GlobeView(props: Props) {
         position,
         properties: { kind: 'company', itemId: company.id },
         point: {
-          pixelSize: highlighted ? 13 : 7,
-          color: highlighted ? COLORS.white : color.withAlpha(0.82),
-          outlineColor: color,
-          outlineWidth: highlighted ? 3 : 1,
+          pixelSize: highlighted ? 14 : 8,
+          color: highlighted ? COLORS.white : color.withAlpha(0.94),
+          outlineColor: highlighted ? color : COLORS.background.withAlpha(0.92),
+          outlineWidth: highlighted ? 4 : 2,
           scaleByDistance: new Cesium.NearFarScalar(1_000_000, 1.2, 25_000_000, 0.65),
         },
-        ellipse: highlighted ? { semiMajorAxis: 140_000, semiMinorAxis: 140_000, material: color.withAlpha(0.08), outline: true, outlineColor: color.withAlpha(0.42), height: 1_000 } : undefined,
-        label: highlighted ? { text: `${company.shortName}  ${company.priceChange >= 0 ? '+' : ''}${company.priceChange.toFixed(2)}%`, font: '500 13px Inter, sans-serif', fillColor: COLORS.white, outlineColor: COLORS.background, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -20), scaleByDistance: new Cesium.NearFarScalar(1_200_000, 1, 25_000_000, 0.55) } : undefined,
+        ellipse: highlighted ? { semiMajorAxis: 140_000, semiMinorAxis: 140_000, material: color.withAlpha(0.065), outline: true, outlineColor: color.withAlpha(0.62), height: 1_000 } : undefined,
+        label: highlighted ? { text: `${company.shortName}  ${company.priceChange >= 0 ? '+' : ''}${company.priceChange.toFixed(2)}%`, font: '600 13px Inter, sans-serif', fillColor: COLORS.white, outlineColor: COLORS.background, outlineWidth: 5, style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -22), showBackground: true, backgroundColor: COLORS.background.withAlpha(0.72), backgroundPadding: new Cesium.Cartesian2(8, 5), scaleByDistance: new Cesium.NearFarScalar(1_200_000, 1, 25_000_000, 0.55) } : undefined,
       });
       if (highlighted) {
         const pulseEpoch = Cesium.JulianDate.now();
@@ -190,14 +231,14 @@ export default function GlobeView(props: Props) {
           const seconds = Cesium.JulianDate.secondsDifference(time ?? pulseEpoch, pulseEpoch);
           return 110_000 + (Math.sin(seconds * 3.8) + 1) * 45_000;
         }, false);
-        sources.companies.entities.add({ position, ellipse: { semiMajorAxis: pulseRadius, semiMinorAxis: pulseRadius, material: color.withAlpha(0.025), outline: true, outlineColor: color.withAlpha(0.35), height: 2_000 } });
+        sources.companies.entities.add({ position, ellipse: { semiMajorAxis: pulseRadius, semiMinorAxis: pulseRadius, material: color.withAlpha(0.018), outline: true, outlineColor: color.withAlpha(0.58), height: 2_000 } });
       }
       if (props.mode === 'companies' && props.showCompanies && topCompanyIds.has(company.id)) {
         const height = Math.min(850_000, 90_000 + Math.log10(company.marketCap + 1) * 160_000);
         sources.companies.entities.add({
           id: `company-column-${company.id}`,
           position: Cesium.Cartesian3.fromDegrees(company.coordinates.longitude, company.coordinates.latitude, height / 2),
-          cylinder: { length: height, topRadius: 8_000, bottomRadius: 16_000, material: color.withAlpha(0.24), outline: true, outlineColor: color.withAlpha(0.52), distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 12_000_000) },
+          cylinder: { length: height, topRadius: 8_000, bottomRadius: 16_000, material: color.withAlpha(0.3), outline: true, outlineColor: color.withAlpha(0.7), distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 12_000_000) },
         });
       }
     });
@@ -217,9 +258,9 @@ export default function GlobeView(props: Props) {
         id: `event-${event.id}`,
         position,
         properties: { kind: 'event', itemId: event.id },
-        point: { pixelSize: selected ? new Cesium.CallbackProperty(() => 14 + (Math.sin(Date.now() / 280) + 1) * 4, false) : 11, color, outlineColor: COLORS.white.withAlpha(0.8), outlineWidth: 1, scaleByDistance: new Cesium.NearFarScalar(1_000_000, 1.3, 25_000_000, 0.72) },
-        ellipse: { semiMajorAxis: selected ? 260_000 : 150_000, semiMinorAxis: selected ? 260_000 : 150_000, material: color.withAlpha(selected ? 0.09 : 0.035), outline: true, outlineColor: color.withAlpha(0.48), height: 30_000 },
-        label: selected ? { text: event.title, font: '500 14px Inter, sans-serif', fillColor: Cesium.Color.fromCssColorString('#ffe4ba'), outlineColor: COLORS.background, outlineWidth: 4, style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -28), scaleByDistance: new Cesium.NearFarScalar(1_000_000, 1, 26_000_000, 0.5) } : undefined,
+        point: { pixelSize: selected ? new Cesium.CallbackProperty(() => 15 + (Math.sin(Date.now() / 320) + 1) * 3, false) : 11, color, outlineColor: COLORS.background.withAlpha(0.96), outlineWidth: selected ? 4 : 3, scaleByDistance: new Cesium.NearFarScalar(1_000_000, 1.3, 25_000_000, 0.76) },
+        ellipse: { semiMajorAxis: selected ? 260_000 : 150_000, semiMinorAxis: selected ? 260_000 : 150_000, material: color.withAlpha(selected ? 0.075 : 0.025), outline: true, outlineColor: color.withAlpha(selected ? 0.72 : 0.56), height: 30_000 },
+        label: selected ? { text: event.title, font: '600 14px Inter, sans-serif', fillColor: Cesium.Color.fromCssColorString('#ffe4ba'), outlineColor: COLORS.background, outlineWidth: 5, style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -30), showBackground: true, backgroundColor: COLORS.background.withAlpha(0.76), backgroundPadding: new Cesium.Cartesian2(9, 5), scaleByDistance: new Cesium.NearFarScalar(1_000_000, 1, 26_000_000, 0.5) } : undefined,
       });
     });
   }, [props.activeTheme, props.events, props.selectedEventId, props.showEvents, ready]);
@@ -239,7 +280,7 @@ export default function GlobeView(props: Props) {
       const color = relationshipColors[relationship.type];
       source.entities.add({
         id: `relationship-${relationship.id}`,
-        polyline: { positions: arcPositions(from.coordinates, to.coordinates), width: 2.2 + relationship.strength * 2, material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.24, color: color.withAlpha(0.88) }), clampToGround: false },
+        polyline: { positions: arcPositions(from.coordinates, to.coordinates), width: 2.4 + relationship.strength * 2, material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.16, taperPower: 0.8, color: color.withAlpha(0.96) }), clampToGround: false },
       });
     });
   }, [props.activeRelationshipIds, props.companies, props.relationships, props.showRelationships, ready]);
