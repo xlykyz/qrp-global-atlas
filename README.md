@@ -18,7 +18,7 @@ npm install
 npm run dev
 ```
 
-打开 `http://localhost:5173/global-atlas`。
+打开 `http://localhost:5140/global-atlas`。
 
 生产构建与预览：
 
@@ -26,6 +26,8 @@ npm run dev
 npm run build
 npm run preview
 ```
+
+预览服务固定使用 `5141` 端口。
 
 运行基础测试：
 
